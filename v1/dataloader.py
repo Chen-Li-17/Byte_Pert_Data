@@ -738,7 +738,7 @@ class Byte_Pert_Data:
         """
         try:
             pert_idx = [np.where(p == self.pert_names)[0][0]
-                    for p in pert.split(' | ')[0:1]]
+                    for p in pert.split(' | ')[0].split('; ') if p != 'control']
         except:
             print(f'{pert} not in pert_names')
             pert_idx = None
