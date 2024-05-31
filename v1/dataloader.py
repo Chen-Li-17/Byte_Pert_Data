@@ -26,8 +26,8 @@ class Byte_Pert_Data:
                  data_dir = '/nfs/public/lichen/data/single_cell/perturb_data/scPerturb/raw/scPerturb_rna/statistic_20240520',
                  prefix = 'ReplogleWeissman2022_K562_essential',
                  pert_cell_filter = 200,
-                 train_ratio = 0.8,
                  seed = 2024,
+                 split_ratio = [0.7, 0.2, 0.1],
                  split_type = 1,
                  var_num = 500,
                  num_de_genes = 20,
@@ -36,7 +36,7 @@ class Byte_Pert_Data:
         self.data_dir = data_dir
         self.prefix = prefix
         self.pert_cell_filter = pert_cell_filter
-        self.train_ratio = train_ratio
+        self.split_ratio = split_ratio
         self.seed = seed
         self.split_type = split_type
         self.var_num = var_num
@@ -67,6 +67,9 @@ class Byte_Pert_Data:
             adata_ori = sc.read_h5ad(os.path.join('/nfs/public/lichen/data/single_cell/perturb_data/scPerturb/raw/scPerturb_rna/add_20240319', f'{self.prefix}.h5ad'))
         
         adata_ori.X = adata_ori.X.astype(np.float32)
+        
+        from scipy.sparse import csr_matrix
+        adata_ori.X = csr_matrix(adata_ori.X)
         
         # - filter cells, and get common_obs
         sc.pp.filter_cells(adata_ori, min_genes=200)
@@ -638,9 +641,9 @@ class Byte_Pert_Data:
                         
                     # - if multiple perts
                     if '; ' in pert:
-                        gears_pert = '+'.join(pert.split(' | ')[0].split('; ')+['ctrl']) # change to gears pert
-                    else:
                         gears_pert = '+'.join(pert.split(' | ')[0].split('; ')) # change to gears pert
+                    else:
+                        gears_pert = '+'.join(pert.split(' | ')[0].split('; ')+['ctrl']) # change to gears pert
                         
                     tmp_Data = Data(x=torch.Tensor(X.reshape(1,-1)), pert_idx=pert_idx,
                                 y=torch.Tensor(y.reshape(1,-1)), de_idx=de_idx, pert=gears_pert)
@@ -798,10 +801,11 @@ class Byte_Pert_Data:
         add some necessary part for gears
         """
         # - add adata
-        self.adata = self.adata_split.copy()
+        self.adata = self.adata_split
         # - change adata.X to csr_matrix
         from scipy.sparse import csr_matrix
-        self.adata.X = csr_matrix(self.adata.X)
+        if isinstance(self.adata.X, np.ndarray):
+            self.adata.X = csr_matrix(self.adata.X)
         print('add adata finished')
         
         # - add node_map
@@ -827,7 +831,7 @@ class Byte_Pert_Data:
         self.adata.obs['condition'] = adata_condition
         
         # - condition_name : this variable should be changed if 
-        self.adata.obs.loc[:, 'condition_name'] =  self.adata.obs.apply(lambda x: ' | '.join([x.perturbation_new, x.celltype]), axis = 1)
+        self.adata.obs.loc[:, 'condition_name'] =  self.adata.obs.apply(lambda x: ' | '.join([x.perturbation_new, x.celltype_new]), axis = 1)
         print('add condition finished')
         
         # - get the subgroup to evaluate
@@ -847,10 +851,16 @@ class Byte_Pert_Data:
                 # 'unseen_single': []
             }
         }
-        tmp_list = ['+'.join([i.split(' | ')[0],'ctrl']) for i in self.dataset_perturbation_list['test']]
+        def convert_gears_pert(my_pert):
+            if ';' in my_pert:
+                return '+'.join(my_pert.split(' | ')[0].split('; '))
+            else:
+                return '+'.join(my_pert.split(' | ')[0].split('; ')+['ctrl'])
+        
+        tmp_list = [convert_gears_pert(i) for i in self.dataset_perturbation_list['test']]
         subgroup['test_subgroup']['unseen_single'] = list(tmp_list)
         
-        tmp_list = ['+'.join([i.split(' | ')[0],'ctrl']) for i in self.dataset_perturbation_list['val']]
+        tmp_list = [convert_gears_pert(i) for i in self.dataset_perturbation_list['val']]
         subgroup['val_subgroup']['unseen_single'] = list(tmp_list)
         
         self.subgroup = subgroup
@@ -867,4 +877,126 @@ class Byte_Pert_Data:
         # set2conditions['val'] = set2conditions['test']
         self.set2conditions = set2conditions
         print('add set2conditions finished')
+        
+    def get_Data_scgpt(self,
+                    dataset_name = ['train', 'test', 'val'],
+                    num_de_genes = 20,
+                    test_mode = False,
+                    add_control = True):
+        """
+        this is for constructing datasets of gears format
+        """
+
+        self.dataset_perturbation_list = {} # save perturbation_list for train/test
+        self.dataset_pert_cell_graphs = {} # save the pert_cell_graphs
+
+        self.var_idx_dict = dict(zip(self.var_genes, np.arange(len(self.var_genes))))
+        
+        for dataset in dataset_name:
+            # - get the perturbation list
+            tmp_obs = self.adata_split[self.adata_split.obs['data_split']==dataset].obs
+            tmp_obs = tmp_obs[tmp_obs['perturbation_new']!='control']
+            tmp_perturbation_list = list(tmp_obs['perturbation_group'].unique()) # record the perturbation pair
+            tmp_adata_split = self.adata_split[tmp_obs.index]
+            
+            # - get total cell graphs for each dataset
+            pert_cell_graphs = {}
+            for pert in tqdm(tmp_perturbation_list):
+                adata_pert = tmp_adata_split[tmp_adata_split.obs['perturbation_group']==pert]
+                Xs = adata_pert.X # ctrl value
+                ys = self.adata_split[adata_pert.obs['control_barcode']].X # perturb value
+                
+                # - get the de_idx for pert
+                if 'rank_genes_groups' in adata_pert.uns:
+                    de_genes = adata_pert.uns['rank_genes_groups']
+                    self.de = True
+                else:
+                    self.de = False
+                    # num_de_genes = 1
+                    
+                if self.de:
+                    de_idx = np.where(adata_pert.var_names.isin(
+                    np.array(de_genes[pert][:num_de_genes])))[0]
+                else:
+                    de_idx = [-1] * num_de_genes
+                    
+                # - get the pert_idx [TODO]
+                pert_idx = self.get_pert_idx(pert)
+                
+                if not isinstance(Xs, np.ndarray):
+                    Xs = Xs.toarray()
+                if not isinstance(ys, np.ndarray):
+                    ys = ys.toarray()
+
+                # - pert_flags for multi perts
+                pert_flags = torch.zeros(Xs.shape[1])
+                for gene in pert.split(' | ')[0].split('; '):
+                    if gene not in self.var_idx_dict:
+                        continue
+                    else:
+                        pert_flags[self.var_idx_dict[gene]] = 1
+                cell_graphs = []
+                # Create cell graphs
+                for X, y in zip(Xs, ys):
+                    # feature_mat = torch.Tensor(X).T
+                    if pert_idx is None:
+                        pert_idx = [-1]
+
+                    # - if multiple perts
+                    if '; ' in pert:
+                        gears_pert = '+'.join(pert.split(' | ')[0].split('; ')) # change to gears pert
+                    else:
+                        gears_pert = '+'.join(pert.split(' | ')[0].split('; ')+['ctrl']) # change to gears pert
+
+                    tmp_Data = Data(x=torch.Tensor(X.reshape(1,-1)), pert_idx=pert_idx,
+                                y=torch.Tensor(y.reshape(1,-1)), de_idx=de_idx, pert=gears_pert,
+                                pert_flags=pert_flags.reshape(1,-1))
+                    cell_graphs.append(tmp_Data)
+                    
+                pert_cell_graphs[pert] = cell_graphs
+                
+                if test_mode:
+                    break
+
+            # - add control to training set
+            if add_control and dataset == 'train':
+                pert = 'control'
+                adata_pert = self.adata_split[self.adata_split.obs['perturbation_new']==pert]
+                Xs = adata_pert.X # ctrl value
+                # ys = self.adata_split[adata_pert.obs['control_barcode']].X # perturb value
+                pert_flags = torch.zeros(Xs.shape[1])
+                if not isinstance(Xs, np.ndarray):
+                    Xs = Xs.toarray()
+                
+                self.de = False
+                # num_de_genes = 1
+                    
+                if self.de:
+                    de_idx = np.where(adata_pert.var_names.isin(
+                    np.array(de_genes[pert][:num_de_genes])))[0]
+                else:
+                    de_idx = [-1]*num_de_genes
+                    
+                cell_graphs = []
+                # Create cell graphs
+                for X, y in zip(Xs, Xs):
+                    # feature_mat = torch.Tensor(X).T
+                    # if pert_idx is None:
+                    pert_idx = [-1]
+                    gears_pert = 'ctrl'
+                    tmp_Data = Data(x=torch.Tensor(X.reshape(1,-1)), pert_idx=pert_idx,
+                                y=torch.Tensor(y.reshape(1,-1)), de_idx=de_idx, pert=gears_pert,
+                                pert_flags=pert_flags.reshape(1,-1))
+                    cell_graphs.append(tmp_Data)
+                    
+                pert_cell_graphs[pert] = cell_graphs
+            
+            # - get the result        
+            self.dataset_perturbation_list[dataset] = tmp_perturbation_list
+            self.dataset_pert_cell_graphs[dataset] = pert_cell_graphs
+                
+            if test_mode:
+                self.dataset_perturbation_list[dataset] = list(pert_cell_graphs.keys())
+                self.dataset_pert_cell_graphs[dataset] = pert_cell_graphs
+        print('='*10,f'get Data_scGPT finished!')
         
