@@ -312,6 +312,8 @@ class Byte_Pert_Data:
                     rankby_abs = True,
                     key_added = 'rank_genes_groups'):
         gene_dict = {}
+        pvals_dict, pvals_adj_dict, scores_dict, logfoldchanges_dict = {}, {}, {}, {}
+
         for pert in tqdm(self.filter_perturbation_list):
             adata_pert = self.adata_split[self.adata_split.obs['perturbation_group']==pert]
             adata_de = self.adata_split[list(adata_pert.obs_names)+list(adata_pert.obs['control_barcode'])].copy()
@@ -327,9 +329,23 @@ class Byte_Pert_Data:
                 method = 'wilcoxon'
             )
             de_genes = pd.DataFrame(adata_de.uns['rank_genes_groups']['names'])
+            pvals = pd.DataFrame(adata_de.uns['rank_genes_groups']['pvals'])
+            pvals_adj = pd.DataFrame(adata_de.uns['rank_genes_groups']['pvals_adj'])
+            scores = pd.DataFrame(adata_de.uns['rank_genes_groups']['scores'])
+            logfoldchanges = pd.DataFrame(adata_de.uns['rank_genes_groups']['logfoldchanges'])
+            
             for group in de_genes:
                 gene_dict[group] = de_genes[group].tolist()
+                pvals_dict[group] = pvals[group].tolist()
+                pvals_adj_dict[group] = pvals_adj[group].tolist()
+                scores_dict[group] = scores[group].tolist()
+                logfoldchanges_dict[group] = logfoldchanges[group].tolist()
+            
         self.adata_split.uns[key_added] = gene_dict
+        self.adata_split.uns['pvals'] = pvals_dict
+        self.adata_split.uns['pvals_adj'] = pvals_adj_dict
+        self.adata_split.uns['scores'] = scores_dict
+        self.adata_split.uns['logfoldchanges'] = logfoldchanges_dict
         print('='*10,f'get de genes finished!')
         
     def get_edis(self,
@@ -482,18 +498,23 @@ class Byte_Pert_Data:
                 
             
             
-            gene = pert.split(' | ')[0]
+            genes = pert.split(' | ')[0].split('; ')
             adata_ctrl = self.adata_split[self.adata_split.obs['perturbation_group']=='control'+' | '+pert.split(' | ')[1]]
-            if gene in adata_ctrl.var_names:
+            flag = True
+            for gene in genes:
+                if gene not in adata_ctrl.var_names:
+                    flag = False
+            if flag:
+            # if gene in adata_ctrl.var_names:
                 # print(f'{gene} is in var')
-                gene_ctrl_expr = np.mean(adata_ctrl[:,[gene]].X.toarray())
+                gene_ctrl_expr = np.mean(adata_ctrl[:,[genes[0]]].X.toarray())
 
                 gene_sgRNA_expr_list = []
                 cell_num_list = []
                 for sgRNA in sgRNA_list:
                     adata_sub = adata_pert[adata_pert.obs['pert_sgRNA']==sgRNA]
                     cell_num_list.append(len(adata_sub))
-                    gene_sgRNA_expr_list.append(np.mean(adata_sub[:,[gene]].X.toarray()))
+                    gene_sgRNA_expr_list.append(np.mean(adata_sub[:,[genes[0]]].X.toarray()))
                     
                     
                 # - get the sort sgRNA edis pd    
@@ -631,6 +652,7 @@ class Byte_Pert_Data:
                     Xs = Xs.toarray()
                 if not isinstance(ys, np.ndarray):
                     ys = ys.toarray()
+                Xs, ys = ys, Xs
 
                 cell_graphs = []
                 # Create cell graphs

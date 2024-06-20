@@ -297,3 +297,348 @@ def get_info_txt(pert_data = None,
         file.write('*'*20+'sgRNA Info'+'*'*20+'\n')
         file.write(sgRNA_info)
         file.write('\n')
+        
+        
+def deeper_analysis_new(adata, test_res, de_column_prefix = 'rank_genes_groups_cov', most_variable_genes = None):
+    
+    metric2fct = {
+           'pearson': pearsonr,
+           'mse': mse
+    }
+
+    pert_metric = {}
+
+    ## in silico modeling and upperbounding
+    pert2pert_full_id = dict(adata.obs[['condition', 'condition_name']].values)
+    geneid2name = dict(zip(adata.var.index.values, adata.var['gene_name']))
+    geneid2idx = dict(zip(adata.var.index.values, range(len(adata.var.index.values))))
+
+    # calculate mean expression for each condition
+    unique_conditions = adata.obs.condition.unique()
+    conditions2index = {}
+    for i in unique_conditions:
+        conditions2index[i] = np.where(adata.obs.condition == i)[0]
+
+    condition2mean_expression = {}
+    for i, j in conditions2index.items():
+        condition2mean_expression[i] = np.mean(adata.X[j], axis = 0)
+    pert_list = np.array(list(condition2mean_expression.keys()))
+    mean_expression = np.array(list(condition2mean_expression.values())).reshape(len(adata.obs.condition.unique()), adata.X.shape[1])
+    ctrl = mean_expression[np.where(pert_list == 'ctrl')[0]] # 这是adata中所有ctrl的mean
+    
+    if most_variable_genes is None:
+        most_variable_genes = np.argsort(np.std(mean_expression, axis = 0))[-200:]
+        
+    gene_list = adata.var['gene_name'].values
+
+    # 可能这里的ctrl需要修改
+    for pert in np.unique(test_res['pert_cat']):
+        metric2fct = {
+        'pearson': pearsonr,
+        'mse': mse
+        }
+        pert_metric[pert] = {}
+        de_idx = [geneid2idx[i] for i in adata.uns['rank_genes_groups_cov_all'][pert2pert_full_id[pert]][:20]]
+        de_idx_200 = [geneid2idx[i] for i in adata.uns['rank_genes_groups_cov_all'][pert2pert_full_id[pert]][:200]]
+        de_idx_100 = [geneid2idx[i] for i in adata.uns['rank_genes_groups_cov_all'][pert2pert_full_id[pert]][:100]]
+        de_idx_50 = [geneid2idx[i] for i in adata.uns['rank_genes_groups_cov_all'][pert2pert_full_id[pert]][:50]]
+        de_idx_all = [geneid2idx[i] for i in adata.uns['rank_genes_groups_cov_all'][pert2pert_full_id[pert]][:]]
+
+        pert_idx = np.where(test_res['pert_cat'] == pert)[0]    
+        pred_mean = np.mean(test_res['pred_de'][pert_idx], axis = 0).reshape(-1,)
+        true_mean = np.mean(test_res['truth_de'][pert_idx], axis = 0).reshape(-1,)
+        
+        direc_change = np.abs(np.sign(test_res['pred'][pert_idx].mean(0) - ctrl[0]) - np.sign(test_res['truth'][pert_idx].mean(0) - ctrl[0]))            
+        frac_correct_direction = len(np.where(direc_change == 0)[0])/len(geneid2name)
+        pert_metric[pert]['frac_correct_direction_all'] = frac_correct_direction
+
+        de_idx_map = {'top20_de': de_idx,
+                      'top50_de': de_idx_50,
+                      'top100_de': de_idx_100,
+                      'top200_de': de_idx_200,
+                      'all_de':de_idx_all,
+                     }
+        
+        for val in list(de_idx_map.keys()):
+            
+            direc_change = np.abs(np.sign(test_res['pred'][pert_idx].mean(0)[de_idx_map[val]] - ctrl[0][de_idx_map[val]]) - np.sign(test_res['truth'][pert_idx].mean(0)[de_idx_map[val]] - ctrl[0][de_idx_map[val]]))            
+            frac_correct_direction = len(np.where(direc_change == 0)[0])/len(de_idx_map[val])
+            pert_metric[pert]['frac_correct_direction_' + str(val)] = frac_correct_direction
+
+        mean = np.mean(test_res['truth_de'][pert_idx], axis = 0)
+        std = np.std(test_res['truth_de'][pert_idx], axis = 0)
+        min_ = np.min(test_res['truth_de'][pert_idx], axis = 0)
+        max_ = np.max(test_res['truth_de'][pert_idx], axis = 0)
+        q25 = np.quantile(test_res['truth_de'][pert_idx], 0.25, axis = 0)
+        q75 = np.quantile(test_res['truth_de'][pert_idx], 0.75, axis = 0)
+        q55 = np.quantile(test_res['truth_de'][pert_idx], 0.55, axis = 0)
+        q45 = np.quantile(test_res['truth_de'][pert_idx], 0.45, axis = 0)
+        q40 = np.quantile(test_res['truth_de'][pert_idx], 0.4, axis = 0)
+        q60 = np.quantile(test_res['truth_de'][pert_idx], 0.6, axis = 0)
+
+        zero_des = np.intersect1d(np.where(min_ == 0)[0], np.where(max_ == 0)[0])
+        nonzero_des = np.setdiff1d(list(range(20)), zero_des)
+        if len(nonzero_des) == 0:
+            pass
+            # pert that all de genes are 0...
+        else:            
+            # 原来这个nonzero是不变化的gene；以及这里都是对top 20 de gene的分析
+            direc_change = np.abs(np.sign(pred_mean[nonzero_des] - ctrl[0][de_idx][nonzero_des]) - np.sign(true_mean[nonzero_des] - ctrl[0][de_idx][nonzero_des]))            
+            frac_correct_direction = len(np.where(direc_change == 0)[0])/len(nonzero_des)
+            pert_metric[pert]['frac_correct_direction_20_nonzero'] = frac_correct_direction
+            
+            in_range = (pred_mean[nonzero_des] >= min_[nonzero_des]) & (pred_mean[nonzero_des] <= max_[nonzero_des])
+            frac_in_range = sum(in_range)/len(nonzero_des)
+            pert_metric[pert]['frac_in_range'] = frac_in_range
+
+            in_range_5 = (pred_mean[nonzero_des] >= q45[nonzero_des]) & (pred_mean[nonzero_des] <= q55[nonzero_des])
+            frac_in_range_45_55 = sum(in_range_5)/len(nonzero_des)
+            pert_metric[pert]['frac_in_range_45_55'] = frac_in_range_45_55
+
+            in_range_10 = (pred_mean[nonzero_des] >= q40[nonzero_des]) & (pred_mean[nonzero_des] <= q60[nonzero_des])
+            frac_in_range_40_60 = sum(in_range_10)/len(nonzero_des)
+            pert_metric[pert]['frac_in_range_40_60'] = frac_in_range_40_60
+
+            in_range_25 = (pred_mean[nonzero_des] >= q25[nonzero_des]) & (pred_mean[nonzero_des] <= q75[nonzero_des])
+            frac_in_range_25_75 = sum(in_range_25)/len(nonzero_des)
+            pert_metric[pert]['frac_in_range_25_75'] = frac_in_range_25_75
+
+            zero_idx = np.where(std > 0)[0]
+            sigma = (np.abs(pred_mean[zero_idx] - mean[zero_idx]))/(std[zero_idx])
+            pert_metric[pert]['mean_sigma'] = np.mean(sigma)
+            pert_metric[pert]['std_sigma'] = np.std(sigma)
+            pert_metric[pert]['frac_sigma_below_1'] = 1 - len(np.where(sigma > 1)[0])/len(zero_idx)
+            pert_metric[pert]['frac_sigma_below_2'] = 1 - len(np.where(sigma > 2)[0])/len(zero_idx)
+
+        ## correlation on delta
+        p_idx = np.where(test_res['pert_cat'] == pert)[0]
+
+        # 感觉这一部分和之前的有重复，怪怪的
+        for m, fct in metric2fct.items():
+            if m == 'pearson':
+                val = fct(test_res['pred'][p_idx].mean(0)- ctrl[0], test_res['truth'][p_idx].mean(0)-ctrl[0])[0]
+                if np.isnan(val):
+                    val = 0
+
+                pert_metric[pert][m + '_delta'] = val
+                
+                val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])[0]
+                if np.isnan(val):
+                    val = 0
+
+                pert_metric[pert][m + '_delta_de'] = val
+
+        # 感觉这里提出fold change是很奇怪的指标，暂时没想明白含义
+        
+        ## up fold changes > 10?
+        pert_mean = np.mean(test_res['truth'][p_idx], axis = 0).reshape(-1,)
+
+        fold_change = pert_mean/ctrl
+        fold_change[np.isnan(fold_change)] = 0
+        fold_change[np.isinf(fold_change)] = 0
+        ## this is to remove the ones that are super low and the fold change becomes unmeaningful
+        fold_change[0][np.where(pert_mean < 0.5)[0]] = 0
+
+        o =  np.where(fold_change[0] > 0)[0]
+
+        pred_fc = test_res['pred'][p_idx].mean(0)[o]
+        true_fc = test_res['truth'][p_idx].mean(0)[o]
+        ctrl_fc = ctrl[0][o]
+
+        if len(o) > 0:
+            pert_metric[pert]['fold_change_gap_all'] = np.mean(np.abs(pred_fc/ctrl_fc - true_fc/ctrl_fc))
+
+
+        o = np.intersect1d(np.where(fold_change[0] <0.333)[0], np.where(fold_change[0] > 0)[0])
+
+        pred_fc = test_res['pred'][p_idx].mean(0)[o]
+        true_fc = test_res['truth'][p_idx].mean(0)[o]
+        ctrl_fc = ctrl[0][o]
+
+        if len(o) > 0:
+            pert_metric[pert]['fold_change_gap_downreg_0.33'] = np.mean(np.abs(pred_fc/ctrl_fc - true_fc/ctrl_fc))
+
+
+        o = np.intersect1d(np.where(fold_change[0] <0.1)[0], np.where(fold_change[0] > 0)[0])
+
+        pred_fc = test_res['pred'][p_idx].mean(0)[o]
+        true_fc = test_res['truth'][p_idx].mean(0)[o]
+        ctrl_fc = ctrl[0][o]
+
+        if len(o) > 0:
+            pert_metric[pert]['fold_change_gap_downreg_0.1'] = np.mean(np.abs(pred_fc/ctrl_fc - true_fc/ctrl_fc))
+
+        o = np.where(fold_change[0] > 3)[0]
+
+        pred_fc = test_res['pred'][p_idx].mean(0)[o]
+        true_fc = test_res['truth'][p_idx].mean(0)[o]
+        ctrl_fc = ctrl[0][o]
+
+        if len(o) > 0:
+            pert_metric[pert]['fold_change_gap_upreg_3'] = np.mean(np.abs(pred_fc/ctrl_fc - true_fc/ctrl_fc))
+
+        o = np.where(fold_change[0] > 10)[0]
+
+        pred_fc = test_res['pred'][p_idx].mean(0)[o]
+        true_fc = test_res['truth'][p_idx].mean(0)[o]
+        ctrl_fc = ctrl[0][o]
+
+        if len(o) > 0:
+            pert_metric[pert]['fold_change_gap_upreg_10'] = np.mean(np.abs(pred_fc/ctrl_fc - true_fc/ctrl_fc))
+
+        # 这种most variable gene需要关注吗？不是很明白；计算的是所有pert的most variable，直接根据std来计算
+        
+        ## most variable genes
+        for m, fct in metric2fct.items():
+            if m != 'mse':
+                val = fct(test_res['pred'][p_idx].mean(0)[most_variable_genes] - ctrl[0][most_variable_genes], test_res['truth'][p_idx].mean(0)[most_variable_genes]-ctrl[0][most_variable_genes])[0]
+                if np.isnan(val):
+                    val = 0
+                pert_metric[pert][m + '_delta_top200_hvg'] = val
+
+
+                val = fct(test_res['pred'][p_idx].mean(0)[most_variable_genes], test_res['truth'][p_idx].mean(0)[most_variable_genes])[0]
+                if np.isnan(val):
+                    val = 0
+                pert_metric[pert][m + '_top200_hvg'] = val
+            else:
+                val = fct(test_res['pred'][p_idx].mean(0)[most_variable_genes], test_res['truth'][p_idx].mean(0)[most_variable_genes])
+                pert_metric[pert][m + '_top200_hvg'] = val
+
+
+        ## top 20/50/100/200 DEs 这里是非常关键的部分，之后也可以从这里看
+        
+        for prefix in list(de_idx_map.keys()):
+            de_idx = de_idx_map[prefix]
+            for m, fct in metric2fct.items():
+                if m != 'mse':
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])[0]
+                    if np.isnan(val):
+                        val = 0
+                    pert_metric[pert][m + f'_delta_{prefix}'] = val
+
+
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx], test_res['truth'][p_idx].mean(0)[de_idx])[0]
+                    if np.isnan(val):
+                        val = 0
+                    pert_metric[pert][m + f'_{prefix}'] = val
+                else:
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])
+                    pert_metric[pert][m + f'_{prefix}'] = val
+        
+        
+        # - 添加我们的分组
+        p_thre_1 = 0.001
+        p_thre_2 = 0.1
+        adata_pert = adata[adata.obs['perturbation_group']==pert2pert_full_id[pert]]
+        adata_ctrl = adata[list(adata_pert.obs['control_barcode'])].copy()
+        names = adata.uns['rank_genes_groups'][pert2pert_full_id[pert]]
+        pvals_adj = adata.uns['pvals_adj'][pert2pert_full_id[pert]]
+        
+        expr_df = pd.DataFrame({'gene':adata_ctrl.var_names,
+                                'expr':np.array(np.mean(adata_ctrl.X, axis=0)).ravel()})
+        pval_df = pd.DataFrame({'gene':names,
+                                'pvals_adj':np.array(pvals_adj)})
+        expr_df.index = expr_df['gene']
+        pval_df.index = pval_df['gene']
+        
+        # finally we choose de genes with rules in this df
+        gene_df = pd.merge(pval_df,expr_df,how='outer',left_index=True,right_index=True)
+        gene_df = gene_df.sort_values(by='pvals_adj', ascending=True)
+
+        gene_df_sig = gene_df[gene_df['pvals_adj']<p_thre_1]
+        gene_df_nonsig = gene_df[gene_df['pvals_adj']>=p_thre_2]
+
+        gene_df_nonsig = gene_df_nonsig.sort_values(by='expr', ascending=False)
+
+        # 1. de part
+        if len(gene_df_sig) < 20:
+            gene_list = list(gene_df.index)[0:20]
+        else:
+            gene_list = list(gene_df_sig.index)
+        idx_list = [geneid2idx[i] for i in gene_list]
+        
+        # 2. non-de & high express
+        if len(gene_df_nonsig) < 200: # if most genes are de genes
+            gene_df_exp = gene_df_sig.sort_values(by='expr', ascending=False)
+            idx_top20 = [geneid2idx[i] for i in list(gene_df_exp.index)[0:20]]
+            idx_top50 = [geneid2idx[i] for i in list(gene_df_exp.index)[0:50]]
+            idx_top100 = [geneid2idx[i] for i in list(gene_df_exp.index)[0:100]]
+            idx_top200 = [geneid2idx[i] for i in list(gene_df_exp.index)[0:200]]
+        else:
+            idx_top20 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[0:20]]
+            idx_top50 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[0:50]]
+            idx_top100 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[0:100]]
+            idx_top200 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[0:200]]
+            
+        de_idx_map = {'top20': idx_top20,
+                      'top50': idx_top50,
+                      'top100': idx_top100,
+                      'top200': idx_top200,
+                     }
+        metric2fct = {
+            'pearson': pearsonr,
+            'mse': mse,
+            'mae': mae
+        }
+        name = 'NonDE-high_'
+        for prefix in list(de_idx_map.keys()):
+            de_idx = de_idx_map[prefix]
+            for m, fct in metric2fct.items():
+                if m == 'pearson':
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])[0]
+                    if np.isnan(val):
+                        val = 0
+                    pert_metric[pert][name + m + f'_delta_{prefix}'] = val
+
+
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx], test_res['truth'][p_idx].mean(0)[de_idx])[0]
+                    if np.isnan(val):
+                        val = 0
+                    pert_metric[pert][name + m + f'_{prefix}'] = val
+                else:
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])
+                    pert_metric[pert][name + m + f'_{prefix}'] = val
+        
+        # 3. non-de & low express
+        if len(gene_df_nonsig) < 200: # if most genes are de genes
+            gene_df_exp = gene_df_sig.sort_values(by='expr', ascending=False)
+            idx_top20 = [geneid2idx[i] for i in list(gene_df_exp.index)[::-1][0:20]]
+            idx_top50 = [geneid2idx[i] for i in list(gene_df_exp.index)[::-1][0:50]]
+            idx_top100 = [geneid2idx[i] for i in list(gene_df_exp.index)[::-1][0:100]]
+            idx_top200 = [geneid2idx[i] for i in list(gene_df_exp.index)[::-1][0:200]]
+        else:
+            idx_top20 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[::-1][0:20]]
+            idx_top50 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[::-1][0:50]]
+            idx_top100 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[::-1][0:100]]
+            idx_top200 = [geneid2idx[i] for i in list(gene_df_nonsig.index)[::-1][0:200]]
+        de_idx_map = {'top20': idx_top20,
+                      'top50': idx_top50,
+                      'top100': idx_top100,
+                      'top200': idx_top200,
+                     }
+        metric2fct = {
+            'pearson': pearsonr,
+            'mse': mse,
+            'mae': mae
+        }
+        name = 'NonDE-low_'
+        for prefix in list(de_idx_map.keys()):
+            de_idx = de_idx_map[prefix]
+            for m, fct in metric2fct.items():
+                if m == 'pearson':
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])[0]
+                    if np.isnan(val):
+                        val = 0
+                    pert_metric[pert][name + m + f'_delta_{prefix}'] = val
+
+
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx], test_res['truth'][p_idx].mean(0)[de_idx])[0]
+                    if np.isnan(val):
+                        val = 0
+                    pert_metric[pert][name + m + f'_{prefix}'] = val
+                else:
+                    val = fct(test_res['pred'][p_idx].mean(0)[de_idx] - ctrl[0][de_idx], test_res['truth'][p_idx].mean(0)[de_idx]-ctrl[0][de_idx])
+                    pert_metric[pert][name + m + f'_{prefix}'] = val
+
+    return pert_metric
